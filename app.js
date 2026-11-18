@@ -169,7 +169,14 @@ const initialsOf = n => n.name.replace(/^(Dr\.|Rev\.)\s+/, '').split(/\s+/).filt
 const imgCache = new Map();
 function loadImg(src) {
   // crossOrigin lets a picture hosted elsewhere (Wikimedia, the Library of Congress) be drawn into the scene
-  if (!imgCache.has(src)) imgCache.set(src, new Promise(res => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = () => res(null); im.src = src; }));
+  // decode() unpacks the picture off the main thread before it's used. Without it, drawing a large photo into a canvas
+  // decodes it right there on the main thread, and a screen full of them froze the map for a second or two.
+  if (!imgCache.has(src)) imgCache.set(src, new Promise(res => {
+    const im = new Image(); im.crossOrigin = 'anonymous';
+    im.onload = () => (im.decode ? im.decode().catch(() => {}) : Promise.resolve()).then(() => res(im));
+    im.onerror = () => res(null);
+    im.src = src;
+  }));
   return imgCache.get(src);
 }
 function drawCover(x, im, w, h) {
@@ -576,10 +583,39 @@ function renderShots() {
     return { mesh, delay: calm() ? 0 : 1500 + i * 220, t0 };
   });
   // The node and everything it connects to directly show their own photo inside their outline
-  for (const id of [selected, ...adj.get(selected).map(e => e.id)]) {
-    const it = items.get(id);
-    if (it.photo.material.map) continue;
-    nodeTexture(it.n).then(tex => { it.photo.material.map = tex; it.photo.material.needsUpdate = true; it.photo.visible = true; });
+  // The selected entry and its connections go to the front of the queue: they're what the reader is looking at
+  for (const id of [selected, ...adj.get(selected).map(e => e.id)]) ensurePhoto(items.get(id), true);
+}
+/* Pictures inside the shapes load through a small queue. Explore can put 40+ pictured shapes on screen at once;
+   loading and handing them all to the GPU in the same moment made the map freeze on first load. So:
+   - at most PHOTO_LOADS pictures download and decode at a time (photoQueue holds the rest, in order), and
+   - finished pictures wait in photoReady until the frame loop hands at most PHOTOS_PER_FRAME to the GPU per frame.
+   The pictures then appear over a second or so instead of all at once, and the map keeps moving smoothly. */
+const PHOTO_LOADS = 4, PHOTOS_PER_FRAME = 2;
+const photoQueue = [], photoReady = [];
+let photosLoading = 0;
+// Asks for a shape's picture (or its symbol, if it has none) once. it.photoLoading stops the frame loop from
+// queuing the same shape again on every frame while its picture is still on its way.
+function ensurePhoto(it, urgent = false) {
+  if (it.photo.material.map || it.photoLoading) return;
+  it.photoLoading = true;
+  if (urgent) photoQueue.unshift(it); else photoQueue.push(it);
+  pumpPhotos();
+}
+function pumpPhotos() {
+  while (photosLoading < PHOTO_LOADS && photoQueue.length) {
+    const it = photoQueue.shift();
+    photosLoading++;
+    nodeTexture(it.n).then(tex => { photosLoading--; photoReady.push([it, tex]); pumpPhotos(); });
+  }
+}
+// Called once per frame from tick()
+function applyReadyPhotos() {
+  for (let k = 0; k < PHOTOS_PER_FRAME && photoReady.length; k++) {
+    const [it, tex] = photoReady.shift();
+    it.photoLoading = false;
+    if (it.photo.material.map) continue;               // already filled (e.g. redrawn after a theme switch)
+    it.photo.material.map = tex; it.photo.material.needsUpdate = true; it.photo.visible = true;
   }
 }
 function updateShots(now) {
@@ -804,6 +840,7 @@ function setMode(m, quiet = false) {
   if (m === mode) return;
   const was = mode;
   mode = m;
+  hideTip();                                           // a name tag from the old view shouldn't linger (Timeline hides the map)
   document.body.classList.toggle('exploring', exploring());
   document.body.classList.toggle('timeline', m === 'timeline');
   for (const [k, b] of Object.entries(modeBtns)) { b.classList.toggle('on', k === mode); b.setAttribute('aria-pressed', String(k === mode)); }
@@ -869,7 +906,8 @@ function applyTheme(next, save = true, init = false) {
   rebuildGlints();
   // Canvas textures were drawn in the old colors: drop them and redraw the ones on screen
   for (const [k, t] of texCache) { t.dispose(); texCache.delete(k); }
-  for (const it of items.values()) { it.photo.material.map = null; it.photo.visible = false; it.photo.material.needsUpdate = true; }
+  for (const it of items.values()) { it.photo.material.map = null; it.photo.visible = false; it.photo.material.needsUpdate = true; it.photoLoading = false; }
+  photoQueue.length = 0; photoReady.length = 0;        // pictures drawn in the old colors are dropped; the frame loop asks again
   renderShots();
   if (save) { try { localStorage.setItem('svhm-theme', next); } catch (_) {} }
 }
@@ -1197,6 +1235,126 @@ function setLegend(open) {
 }
 legendBtn.onclick = () => setLegend(!legendEl.classList.contains('open'));
 
+/* ---------- Help: a short guide, one card at a time, opened from the Help button in the top bar (or the ? key) ----------
+   Each step has a title, its text, and `spot`: the controls it talks about. Those get a pulsing rose ring drawn
+   over them, so the guide points at the real buttons. A control that isn't on screen (e.g. the corrections link
+   is hidden on phones and in Timeline) simply gets no ring. To change the wording, edit HELP_STEPS only. */
+const helpEl = document.getElementById('help'), helpOpenBtn = document.getElementById('help-open');
+const helpRings = document.getElementById('help-rings'), helpBody = document.getElementById('help-body');
+const helpTitle = document.getElementById('help-title'), helpCount = document.getElementById('help-count');
+const helpBack = document.getElementById('help-back'), helpNext = document.getElementById('help-next'), helpDots = document.getElementById('help-dots');
+// Small drawings of the map's shapes, matching the Legend's
+const HELP_SHAPE = {
+  person: '<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/></svg>',
+  event: '<svg viewBox="0 0 20 20"><rect x="3.5" y="3.5" width="13" height="13"/></svg>',
+  link: '<svg viewBox="0 0 20 20"><path d="M2 10h14M12.5 6.5 16 10l-3.5 3.5"/></svg>',
+};
+// Text is a function so it can match the device when the guide opens (phones swipe and have no hover or keyboard)
+const HELP_STEPS = [
+  { title: 'Welcome to the South-View Historical Map', spot: [],
+    text: () => `<p>This map connects people who rest at South-View Cemetery with the events in Atlanta’s history that shaped their lives.</p>
+      <ul class="help-key"><li>${HELP_SHAPE.person}A person</li><li>${HELP_SHAPE.event}An event</li><li>${HELP_SHAPE.link}A connection between two of them</li></ul>
+      <p>The <b>Legend</b> button in the corner explains every shape and line, any time you need it.</p>` },
+  { title: 'Three ways to look', spot: ['.modeswitch'],
+    text: () => `<p><b>Focus</b> follows one story at a time: the entry you chose, its card, and arrows to the people and events connected to it.</p>
+      <p><b>Explore</b> lets you roam freely through the years.</p>
+      <p><b>Timeline</b> steps through the events in order, one card at a time.</p>` },
+  { title: 'Move through time', spot: ['#year'],
+    text: () => `<p>In <b>Explore</b>, ${isMobile() ? 'swipe up and down' : 'scroll'} to travel through the years${isMobile() ? '' : ' and drag to look around'}. Recent years sit in front and older ones further back; the corner shows the years in view.</p>
+      <p>In <b>Focus</b>, ${isMobile() ? 'choose a name under <b>Travel to</b> on the card to go to a connected entry' : 'follow an arrow to travel to a connected entry, or press <kbd>←</kbd> <kbd>→</kbd> for the entry just earlier or later'}.</p>
+      <p>In <b>Timeline</b>, use <b>Earlier</b> and <b>Later</b>, or drag along the line at the bottom.</p>` },
+  { title: 'Find a person or event', spot: ['#menu'],
+    text: () => `<p>Open the <b>Index</b>${isMobile() ? '' : ' (or press <kbd>/</kbd>)'} to see every person and event on the map, in order of year.</p>
+      <p>Type in the search box to narrow the list, then choose a name to go straight to it.</p>` },
+  { title: 'Open a story', spot: [],
+    text: () => `<p>${isMobile() ? 'Tap' : 'Click'} any shape to focus on it. Its card opens with the beginning of its story.${isMobile() ? '' : ' Point at a shape to see its name.'}</p>
+      <p>Choose <b>Learn more</b>, or the name at the top of the card, to read the whole story and see everything it connects to.</p>
+      <p>If it has a picture, ${isMobile() ? 'tap' : 'click'} the shape again to see the picture large.${isMobile() ? '' : ' Press <kbd>Esc</kbd> to step back.'}</p>` },
+  { title: 'Sources and corrections', spot: ['#fix-open'],
+    text: () => `<p>Every full card ends with its <b>sources</b>, numbered and linked, and a credit for its picture, so you can check where each fact comes from.</p>
+      <p>If something looks wrong or is missing, choose <b>Suggest a correction</b> on the card${isMobile() ? '' : ', or the link at the bottom of the screen'}. South-View reviews every request before anything changes.</p>` },
+  { title: 'Accessibility Options', spot: ['#motion', '#theme'],
+    text: () => `<p><b>Reduce motion</b> turns off the animation and lays the map flat, with time running from left to right.</p>
+      <p><b>Dark mode</b> switches to light text on a dark background. Both choices are remembered next time you visit.</p>
+      <p>You can open this guide again any time with the <b>Help</b> button${isMobile() ? '' : ' or the <kbd>?</kbd> key'}.</p>` },
+];
+let helpAt = 0, helpFrom = null;
+// One ring per spotlighted control that is actually visible, sized to its box with a little room around it
+function placeHelpRings() {
+  helpRings.innerHTML = '';
+  for (const sel of HELP_STEPS[helpAt].spot) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;               // hidden in this view (display: none gives an empty box)
+    const ring = document.createElement('div');
+    ring.className = 'help-ring';
+    ring.style.cssText = `left:${r.left - 6}px; top:${r.top - 6}px; width:${r.width + 12}px; height:${r.height + 12}px;`;
+    helpRings.appendChild(ring);
+  }
+}
+// Puts step k's words into the card (no rings, no focus changes): used to show a step and to measure one
+function fillHelp(k) {
+  const s = HELP_STEPS[k], last = k === HELP_STEPS.length - 1;
+  helpCount.innerHTML = `<i></i>${k + 1} of ${HELP_STEPS.length}`;
+  helpTitle.textContent = s.title;
+  helpBody.innerHTML = s.text();
+  helpBack.disabled = k === 0;
+  helpNext.textContent = last ? 'Done' : 'Next';
+}
+function helpGo(i) {
+  helpAt = Math.max(0, Math.min(HELP_STEPS.length - 1, i));
+  fillHelp(helpAt);
+  helpDots.querySelectorAll('button').forEach((b, k) => { b.classList.toggle('on', k === helpAt); b.setAttribute('aria-current', k === helpAt ? 'step' : 'false'); });
+  placeHelpRings();
+}
+// Every step gets the same card height, the tallest step's, so Back and Next stay put and can be clicked through
+// quickly. Each step is filled in and measured in turn within one frame, so the reader never sees it happen.
+// Capped at the card's own max-height (CSS), past which the card scrolls. Re-measured on open and on resize.
+const helpCard = helpEl.querySelector('.help-card');
+function sizeHelpCard() {
+  helpCard.style.minHeight = '';
+  let tallest = 0;
+  for (let k = 0; k < HELP_STEPS.length; k++) { fillHelp(k); tallest = Math.max(tallest, helpCard.offsetHeight); }
+  const cap = parseFloat(getComputedStyle(helpCard).maxHeight) || Infinity;
+  helpCard.style.minHeight = Math.min(tallest, cap) + 'px';
+}
+function openHelp() {
+  if (helpEl.classList.contains('open')) return;
+  hideTip();
+  closeTlModal(); closeLightbox(); closeFix(); setLegend(false);   // one pop-up at a time
+  helpFrom = document.activeElement;
+  helpEl.classList.add('open');
+  helpOpenBtn.setAttribute('aria-expanded', 'true');
+  sizeHelpCard();
+  helpGo(0);
+  helpNext.focus();
+}
+function closeHelp() {
+  if (!helpEl.classList.contains('open')) return;
+  helpEl.classList.remove('open');
+  helpOpenBtn.setAttribute('aria-expanded', 'false');
+  helpRings.innerHTML = '';
+  if (helpFrom && helpFrom.focus) helpFrom.focus();   // back to where the reader was, usually the Help button
+}
+// A dot per step: jump straight to it
+helpDots.innerHTML = HELP_STEPS.map((s, k) => `<button aria-label="Step ${k + 1}: ${esc(s.title)}"></button>`).join('');
+helpDots.querySelectorAll('button').forEach((b, k) => b.onclick = () => helpGo(k));
+helpOpenBtn.onclick = openHelp;
+document.getElementById('help-close').onclick = closeHelp;
+helpBack.onclick = () => helpGo(helpAt - 1);
+helpNext.onclick = () => (helpAt === HELP_STEPS.length - 1 ? closeHelp() : helpGo(helpAt + 1));
+helpEl.addEventListener('click', e => { if (e.target === helpEl) closeHelp(); });   // a click on the dimmed area outside the card closes it
+// Keep Tab inside the guide while it is open (it is a modal dialog)
+helpEl.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  const f = [...helpEl.querySelectorAll('button:not(:disabled)')];
+  const i = f.indexOf(document.activeElement);
+  if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+  else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
+});
+addEventListener('resize', () => { if (helpEl.classList.contains('open')) { sizeHelpCard(); helpGo(helpAt); } });
+
 /* ---------- Corrections: anyone can ask for a fix, through the form linked in Settings ---------- */
 const fixEl = document.getElementById('fix'), fixAbout = document.getElementById('fix-about');
 fixAbout.innerHTML = '<option value="">The map in general</option>' + nodes.slice().sort((a, b) => a.year - b.year).map(n => `<option value="${n.id}">${esc(n.name)} (${esc(dateOf(n))})</option>`).join('');
@@ -1249,7 +1407,41 @@ function pickAt(e) {
 let press = null;
 window.__map = { items, get shots() { return shots; }, get camOffset() { return camera.position.clone().sub(controls.target).toArray().map(v => +v.toFixed(2)); } };   // handy for debugging in the console
 const dragPlane = new THREE.Plane(), hitPt = new THREE.Vector3();
+/* ---------- Hover name tag ----------
+   A shape's label hides when it would cover something else, and fades with distance in time, so a shape (or its picture)
+   can be on screen with no readable name. Pointing at a shape shows its name, kind and dates in a small tag by the pointer.
+   Mouse and pen only: touch screens have no hover (the CSS also hides .tip there). */
+const tipEl = document.getElementById('tip');
+let tipId = null;                                     // the entry the tag is showing, or null when hidden
+function showTip(hit, e) {
+  // Only shapes get a tag: the photo panels around the selected entry (userData.shot) already belong to the open card
+  const id = hit && !hit.object.userData.shot && e.pointerType !== 'touch' ? hit.object.userData.id : null;
+  if (!id) return hideTip();
+  if (id !== tipId) {                                 // rebuild the text only when the pointer moves onto a different shape
+    const n = byId.get(id);
+    tipEl.innerHTML = `<b>${esc(n.name)}</b><span>${TYPE[n.type]} · ${esc(dateOf(n))}</span>`;
+    tipId = id;
+  }
+  tipEl.classList.add('show');
+  // Below and to the right of the pointer; flipped to the other side near the right or bottom edge so it never runs off screen
+  const w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+  let x = e.clientX + 14, y = e.clientY + 18;
+  if (x + w > innerWidth - 8) x = e.clientX - w - 14;
+  if (y + h > innerHeight - 8) y = e.clientY - h - 12;
+  tipEl.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+}
+function hideTip() {
+  if (tipId === null) return;
+  tipId = null;
+  tipEl.classList.remove('show');
+}
+// The tag goes away when the pointer leaves the map (onto a label, a panel or off the window) and while the view scrolls,
+// since the shapes move under a still pointer; it comes back on the next pointer move
+renderer.domElement.addEventListener('pointerleave', hideTip);
+renderer.domElement.addEventListener('wheel', hideTip, { passive: true });
+
 renderer.domElement.addEventListener('pointerdown', e => {
+  hideTip();                                           // no tag while clicking or dragging
   const hit = pickAt(e);
   press = { x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY, hit, drag: false, id: e.pointerId };
   if (exploring()) try { renderer.domElement.setPointerCapture(e.pointerId); } catch (_) {}
@@ -1263,7 +1455,12 @@ renderer.domElement.addEventListener('pointerdown', e => {
   }
 });
 renderer.domElement.addEventListener('pointermove', e => {
-  if (!press) { renderer.domElement.style.cursor = pickAt(e) ? 'grab' : 'default'; return; }
+  if (!press) {
+    const hit = pickAt(e);
+    renderer.domElement.style.cursor = hit ? 'grab' : 'default';
+    showTip(hit, e);                                   // name tag for the shape under the pointer (Focus and Explore)
+    return;
+  }
   const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
   if (press.hit && moved > 5 && !exploring()) {
     press.drag = true;
@@ -1305,6 +1502,13 @@ renderer.domElement.addEventListener('pointerup', e => {
   renderer.domElement.style.cursor = 'default';
 });
 addEventListener('keydown', e => {
+  // While the help guide is open, keys only move through it: ← → step, Esc closes
+  if (helpEl.classList.contains('open')) {
+    if (e.key === 'Escape') closeHelp();
+    else if (e.key === 'ArrowRight') helpGo(helpAt + 1);
+    else if (e.key === 'ArrowLeft') helpGo(helpAt - 1);
+    return;
+  }
   if (e.key === 'Escape' && lightbox.classList.contains('open')) return closeLightbox();
   if (e.key === 'Escape' && tlModal.classList.contains('open')) return closeTlModal();
   if (tlModal.classList.contains('open')) return;   // keys stay inside the pop-up while it is open
@@ -1313,6 +1517,8 @@ addEventListener('keydown', e => {
   if (e.key === 'Escape') { if (exploring() || mode === 'timeline') setMode('focus'); else if (detail) { detail = false; renderCard(); syncUrl(); } return closeIndex(); }
   if (e.target.closest && e.target.closest('input, textarea, select')) return;
   if (e.key === '/') { e.preventDefault(); openIndex(); q.focus(); return; }
+  if (e.key === '?') { e.preventDefault(); openHelp(); return; }   // Shift + /
+
   if (mode === 'timeline') {
     if (e.key === 'ArrowLeft') { e.preventDefault(); timelineGo(tlAt - 1); }
     if (e.key === 'ArrowRight') { e.preventDefault(); timelineGo(tlAt + 1); }
@@ -1376,6 +1582,8 @@ function tick(now) {
 
   const focusYear = focusYearNow();
   const appear = calm() ? 1 : smooth(0, 1.8, (now - born) / 1000);
+  // The opening title starts fading at 1.6s and is gone by about 2.8s (see Start); with ?intro=0 or reduced motion there is none
+  const introDone = calm() || skipIntro || now - born > 2800;
   const S = items.get(selected);
 
   for (const it of items.values()) {
@@ -1401,7 +1609,15 @@ function tick(now) {
     line.material.color.lerp(isSel ? C_ROSE : C_WHITE, lr(0.08));
     line.material.opacity = it.alpha;
     fill.visible = it.alpha > 0.03;
-    photo.material.opacity += ((isSel ? it.alpha : h === 1 ? it.alpha * 0.85 : 0) - photo.material.opacity) * lr(0.06);
+    // In Explore, every shape that has a picture shows it, so scrolling through the years reads as a wall of faces and
+    // places rather than empty outlines. Shapes without a picture keep their plain outline there (no symbol tile).
+    // Focus is unchanged: only the selected entry and its direct connections show a picture.
+    const explorePic = exploring() && !!n.picture;
+    // Load only once it's actually on screen, and not while the opening title is still fading: the reader is
+    // watching that, so the pictures start right after it instead of competing with it
+    if (explorePic && it.alpha > 0.1 && introDone) ensurePhoto(it);
+    const picA = isSel ? it.alpha : (h === 1 || explorePic) ? it.alpha * 0.85 : 0;
+    photo.material.opacity += (picA - photo.material.opacity) * lr(0.06);
     halo.material.opacity = 0;
     const c = toScreen(group.position), top = toScreen(tmp2.copy(group.position).addScaledVector(camUp, SIZE[n.type] * group.scale.x));
     it.sx = c.x; it.sy = c.y; it.sr = Math.abs(c.y - top.y);
@@ -1438,6 +1654,7 @@ function tick(now) {
     bright.material.opacity = (0.45 + Math.sin(t * 0.4) * 0.1) * TH().starK;
   }
 
+  applyReadyPhotos();                                 // at most two new pictures reach the GPU per frame
   updateShots(now);
   layoutOverlay(now, dt);
 

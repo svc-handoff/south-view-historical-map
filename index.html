@@ -110,8 +110,10 @@ body.still .card, body.still .arrow, body.still .badge, body.still .rip-svg * { 
 .facts div:last-child { grid-column: 1 / -1; }
 .facts dt { font-size: 11px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--dim); }
 .facts dd { margin: 4px 0 0; font-size: 14px; color: var(--text); }
-.year { position: fixed; right: 30px; bottom: 26px; z-index: 4; font-size: 44px; font-style: italic; color: var(--white); pointer-events: none; letter-spacing: .02em; }
-.year::before { content: 'Years in view'; display: block; font-size: 11px; font-style: normal; font-weight: 700; letter-spacing: .22em; text-transform: uppercase; color: var(--dim); text-align: right; margin-bottom: 4px; }
+.year { position: fixed; right: 30px; bottom: 26px; z-index: 4; font-size: 44px; font-style: italic; color: var(--white); pointer-events: none; letter-spacing: .02em; text-align: center; }
+/* The label sits centered over the years. Letter-spacing also adds space after the last letter, which would pull the
+   centered label left; the matching padding on the left evens it out. */
+.year::before { content: 'Years in view'; display: block; font-size: 11px; font-style: normal; font-weight: 700; letter-spacing: .22em; padding-left: .22em; text-transform: uppercase; color: var(--dim); text-align: center; margin-bottom: 4px; }
 .card .kind { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--grey); }
 .card .kind i { width: 16px; height: 1px; background: var(--rose); display: inline-block; }
 .card .name { display: block; margin: 10px 0 4px; text-align: left; font-size: 34px; line-height: 1.04; letter-spacing: -.005em; color: var(--white); }
@@ -233,6 +235,53 @@ body.reduced *, body.reduced *::before, body.reduced *::after { transition: none
 .theme .sun { display: none; }
 :root[data-theme="dark"] .theme .sun { display: block; }
 :root[data-theme="dark"] .theme .moon { display: none; }
+
+/* Help button: same pill as Reduce motion and Dark mode. It opens the step-by-step guide (#help). */
+.help-btn { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px 0 12px; border: 1px solid var(--hair); border-radius: 999px; font-size: 13px; color: var(--grey); transition: border-color .3s, color .3s, background .3s; }
+.help-btn svg { width: 15px; height: 15px; }
+.help-btn:hover, .help-btn[aria-expanded="true"] { color: var(--white); border-color: rgba(var(--fg-rgb),.35); }
+
+/* Hover name tag: follows the pointer over a shape, so its name is readable even when the label under it is hidden or faded */
+.tip { position: fixed; left: 0; top: 0; z-index: 8; max-width: 280px; padding: 7px 11px 8px; border: 1px solid var(--hair); border-radius: 9px;
+  background: rgba(var(--panel-rgb),.95); box-shadow: 0 6px 20px rgba(26,25,21,.14); pointer-events: none; opacity: 0; transition: opacity .15s ease; }
+.tip.show { opacity: 1; }
+.tip b { display: block; font-size: 14px; font-weight: 700; line-height: 1.25; color: var(--white); }
+.tip span { display: block; margin-top: 2px; font-size: 12px; font-style: italic; color: var(--grey); }
+body.reduced .tip { transition: none; }
+@media (hover: none) { .tip { display: none; } }   /* touch screens have no hover */
+
+/* Help guide: one card at a time with Back / Next. No blur behind it, so the rose rings can point at the real controls. */
+.help { position: fixed; inset: 0; z-index: 30; display: none; place-items: center; padding: 24px; background: rgba(var(--bg-rgb),.38); }
+.help.open { display: grid; animation: tl-m-in .25s ease; }
+.help-rings { position: absolute; inset: 0; pointer-events: none; }
+.help-ring { position: absolute; border: 2px solid var(--rose); border-radius: 999px; box-shadow: 0 0 0 4px rgba(212,60,103,.18); animation: help-pulse 1.8s ease-in-out infinite; }
+@keyframes help-pulse { 50% { box-shadow: 0 0 0 9px rgba(212,60,103,.06); } }
+.help-card { position: relative; display: flex; flex-direction: column; width: min(460px, 100%); max-height: calc(100dvh - 48px); overflow: auto; padding: 22px 26px 18px; border: 1px solid var(--hair); border-radius: 14px;
+  background: rgb(var(--panel-rgb)); box-shadow: 0 20px 60px rgba(26,25,21,.22); }
+.help.open .help-card { animation: tl-m-up .3s cubic-bezier(.16,1,.3,1); }
+body.reduced .help.open, body.reduced .help.open .help-card, body.reduced .help-ring { animation: none; }
+.help-x { position: absolute; top: 10px; right: 10px; width: 40px; height: 40px; border-radius: 50%; color: var(--grey); font-size: 22px; line-height: 1; }
+.help-x:hover { color: var(--white); background: rgba(var(--fg-rgb),.06); }
+.help-count { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--grey); }
+.help-count i { width: 16px; height: 1px; background: var(--rose); display: inline-block; }
+.help-card h2 { margin: 10px 40px 6px 0; font-size: 28px; font-weight: 400; line-height: 1.1; color: var(--white); }
+.help-body { flex: 1 0 auto; }   /* takes up the spare height when a step is shorter than the tallest, keeping Back/Next at the bottom */
+.help-body p { margin: 10px 0 0; font-size: 15px; line-height: 1.6; color: var(--text); }
+.help-body b { color: var(--white); }
+.help-body kbd { font: 12px var(--font); padding: 1px 6px; border: 1px solid var(--hair); border-radius: 5px; }
+.help-key { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 7px; }
+.help-key li { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
+.help-key svg { flex: none; width: 20px; height: 20px; fill: none; stroke: var(--white); stroke-width: 1.3; }
+.help-nav { display: flex; align-items: center; gap: 10px; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--hair); }
+.help-dots { display: flex; gap: 6px; margin-right: auto; }
+.help-dots button { width: 8px; height: 8px; border-radius: 50%; background: rgba(var(--fg-rgb),.18); }
+.help-dots button.on { background: var(--rose); }
+.help-nav .help-back, .help-nav .help-next { min-height: 38px; padding: 0 16px; border-radius: 999px; font-size: 14px; }
+.help-back { color: var(--grey); border: 1px solid var(--hair); }
+.help-back:hover { color: var(--white); }
+.help-back:disabled { visibility: hidden; }
+.help-next { color: var(--white); border: 1px solid rgba(212,60,103,.6); }
+.help-next:hover { background: rgba(212,60,103,.14); }
 
 /* Corrections */
 .fix-link { position: fixed; left: 22px; bottom: 22px; z-index: 5; font-size: 13px; font-style: italic; color: var(--grey); padding: 6px 0; }
@@ -475,6 +524,11 @@ body.reduced .tl-modal.open, body.reduced .tl-modal.open .tl-m-card { animation:
   .motion span { display: none; }
   .theme { height: 34px; padding: 0 10px; }
   .theme span { display: none; }
+  .help-btn { height: 34px; padding: 0 10px; }
+  .help-btn span { display: none; }
+  .help { padding: 0; place-items: end stretch; }   /* the guide becomes a bottom sheet, like the timeline pop-up */
+  .help-card { width: 100%; max-height: 80dvh; border-radius: 18px 18px 0 0; border-bottom: 0; padding: 18px 18px calc(16px + env(safe-area-inset-bottom)); }
+  .help-card h2 { font-size: 24px; }
   .fix-link { display: none; }
   .legend-box { top: 80px; bottom: auto; right: auto; left: 12px; flex-direction: column-reverse; align-items: flex-start; }
   .legend-btn { height: 30px; }
@@ -500,7 +554,16 @@ body.reduced .tl-modal.open, body.reduced .tl-modal.open .tl-m-card { animation:
   .badge { width: 20px; height: 20px; line-height: 17px; font-size: 11px; }
   .modes button { padding: 6px 10px; }
   button, .conn { min-height: 34px; }
+  /* The Help button made the phone top bar one button wider: the icon buttons become fixed 32px circles, the gaps
+     tighten a little, and nothing is allowed to squash (the Index button used to shrink to 18px on narrow phones) */
+  .top { gap: 4px; padding: 0 10px; }
+  .top > * { flex: none; }
+  .menu, .motion, .theme, .help-btn { width: 32px; height: 32px; min-height: 32px; padding: 0; justify-content: center; }
+  .modeswitch button { padding: 0 6px; }
+  .help-dots button { min-height: 0; }   /* the 34px tap-size rule above would stretch the step dots into bars */
 }
+/* The narrowest phones (e.g. 360px) still can't fit the logo mark beside six buttons: it steps aside */
+@media (max-width: 380px) { .word { display: none; } }
 </style>
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }</script>
 </head>
@@ -526,6 +589,11 @@ body.reduced .tl-modal.open, body.reduced .tl-modal.open .tl-m-card { animation:
     <svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M13.2 10.2A5.6 5.6 0 0 1 5.8 2.8a5.6 5.6 0 1 0 7.4 7.4Z"/></svg>
     <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/></svg>
     <span>Dark mode</span>
+  </button>
+  <!-- Help: opens the step-by-step guide below (#help). Shift + / (the ? key) opens it too. -->
+  <button class="help-btn" id="help-open" aria-haspopup="dialog" aria-controls="help" aria-expanded="false" title="How to use this map">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M6.2 6.4a1.8 1.8 0 1 1 2.5 1.7c-.45.2-.7.55-.7 1v.35M8 11.3v.1"/></svg>
+    <span>Help</span>
   </button>
   <div class="word"><img class="mk" id="mark" src="logo/mark-light.svg" alt=""><b>South-View</b><span>Historical Map</span></div>
 <script>/* The dark theme uses the light-stroked mark; set it now so it never flashes the wrong one */ if (document.documentElement.dataset.theme === 'dark') document.getElementById('mark').src = 'logo/mark-dark.svg';</script>
@@ -605,6 +673,25 @@ body.reduced .tl-modal.open, body.reduced .tl-modal.open .tl-m-card { animation:
     <img alt="">
     <figcaption><b class="lb-name"></b><span class="lb-credit"></span></figcaption>
   </figure>
+</div>
+
+<!-- Hover name tag for shapes on the map (filled in by app.js) -->
+<div class="tip" id="tip" aria-hidden="true"></div>
+
+<!-- Help guide: app.js fills in one step at a time (see HELP_STEPS) -->
+<div class="help" id="help" role="dialog" aria-modal="true" aria-labelledby="help-title">
+  <div class="help-rings" id="help-rings" aria-hidden="true"></div>
+  <article class="help-card">
+    <button class="help-x" id="help-close" aria-label="Close help">×</button>
+    <p class="help-count" id="help-count"></p>
+    <h2 id="help-title"></h2>
+    <div class="help-body" id="help-body" aria-live="polite"></div>
+    <div class="help-nav">
+      <div class="help-dots" id="help-dots"></div>
+      <button class="help-back" id="help-back">Back</button>
+      <button class="help-next" id="help-next">Next</button>
+    </div>
+  </article>
 </div>
 
 <button class="fix-link" id="fix-open">Something need correcting? <u>Send a request</u></button>
