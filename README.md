@@ -1,6 +1,6 @@
 # South-View Historical Map
 
-A 3D map of the people, events and places connected to Historic South-View Cemetery in Atlanta. An LMC 3403 project by Krishna, Lucas, Grant and Matthew.
+A 3D map of the people, events and places connected to Historic South-View Cemetery in Atlanta. An LMC 3403 project by Krishna, Lucas, Grant, Samuel and Matthew.
 
 **Live:** https://south-view-historical-map.vercel.app
 
