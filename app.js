@@ -798,15 +798,19 @@ function drawRipple(now) {
 }
 
 /* ---------- Select ---------- */
-function syncUrl() { history.replaceState(null, '', `?select=${selected}&radius=${radius}${detail ? '&detail=1' : ''}${exploring() ? '&mode=explore' : ''}${reduced ? '&motion=reduced' : ''}`); }
-const modeBtns = { focus: document.getElementById('mode-focus'), explore: document.getElementById('mode-explore') };
+function syncUrl() { history.replaceState(null, '', `?select=${selected}&radius=${radius}${detail ? '&detail=1' : ''}${mode !== 'focus' ? '&mode=' + mode : ''}${reduced ? '&motion=reduced' : ''}`); }
+const modeBtns = { focus: document.getElementById('mode-focus'), explore: document.getElementById('mode-explore'), timeline: document.getElementById('mode-timeline') };
 function setMode(m, quiet = false) {
   if (m === mode) return;
+  const was = mode;
   mode = m;
   document.body.classList.toggle('exploring', exploring());
+  document.body.classList.toggle('timeline', m === 'timeline');
   for (const [k, b] of Object.entries(modeBtns)) { b.classList.toggle('on', k === mode); b.setAttribute('aria-pressed', String(k === mode)); }
   controls.enableRotate = !exploring() && !reduced;   // in Explore (and in 2D), dragging never tilts the view
-  if (exploring()) centerExplore();
+  if (m === 'timeline') { exploreGoal = null; openTimeline(); }
+  else if (exploring()) centerExplore();
+  else if (was === 'timeline') { exploreGoal = null; if (!quiet) return void select(selected, { force: true }); }   // back on the map at the entry the timeline stopped on
   else { exploreGoal = null; if (!quiet) { fadeCardIn(); flyTo(selected); } }
   if (!quiet) syncUrl();
 }
@@ -872,6 +876,7 @@ function applyTheme(next, save = true, init = false) {
 themeBtn.onclick = () => applyTheme(theme === 'dark' ? 'light' : 'dark');
 modeBtns.focus.onclick = () => setMode('focus');
 modeBtns.explore.onclick = () => setMode('explore');
+modeBtns.timeline.onclick = () => setMode('timeline');
 function chooseCardSide() {
   // Put the card on the side with fewer connections, using the camera's resting orientation
   const fwd = viewVec().negate().normalize(), right = new THREE.Vector3().crossVectors(fwd, YAXIS).normalize();
@@ -882,6 +887,7 @@ function chooseCardSide() {
 }
 function select(id, opts = {}) {
   if (!byId.has(id)) return;
+  if (mode === 'timeline' && !opts.force) return void timelineShow(id);   // the index panel moves the timeline instead
   if (exploring()) setMode('focus', true);            // select() does its own flight and card fade
   if (id !== selected) detail = false;
   selected = id;
@@ -903,6 +909,264 @@ function neighborInTime(dir) {
   const pick = list => list.filter(n => dir * (n.year - me.year) > 0).sort((a, b) => dir * (a.year - b.year))[0];
   return pick(adj.get(selected).map(e => byId.get(e.id))) || pick(nodes);
 }
+
+/* ---------- Timeline backdrop: the photos of the entry in the middle and of the entries connected to it ----------
+   Shown only on the Timeline screen. When the entry changes, the old prints fade out and the new ones fade in. */
+const collageEl = document.getElementById('collage');
+let backdropFor = null;
+const SLOTS = {   // where prints go, as fractions of the screen: around the card, never behind its middle
+  wide:  [[.11, .32], [.89, .34], [.1, .64], [.9, .66]],   // beside the card, clear of the top bar, the people list and the time line
+  phone: [[.16, .16], [.84, .18]],
+};
+function timelineBackdrop(n, force = false) {
+  if (!force && backdropFor === n.id) return;
+  backdropFor = n.id;
+  const seen = new Set();
+  const pics = [n, ...adj.get(n.id).map(e => byId.get(e.id)).sort((a, b) => Math.abs(a.year - n.year) - Math.abs(b.year - n.year))]
+    .filter(x => x && x.picture && !seen.has(x.picture) && seen.add(x.picture));
+  const slots = SLOTS[isMobile() ? 'phone' : 'wide'];
+  let seed = [...n.id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 2147483647, 7) || 7;   // the same entry always gets the same scatter
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const base = isMobile() ? 110 : Math.max(170, Math.min(240, innerWidth / 6.5));
+  const layer = document.createElement('div');
+  layer.className = 'layer';
+  layer.innerHTML = pics.slice(0, slots.length).map((p, k) => {
+    const [fx, fy] = slots[k];
+    const w = base * (k === 0 ? 1.15 : 0.85 + rnd() * 0.25);   // the entry's own picture is the biggest
+    const rot = (rnd() - 0.5) * 12;
+    return `<img src="${esc(p.picture)}" alt="" decoding="async" referrerpolicy="no-referrer" style="width:${w.toFixed(0)}px;left:${(fx * 100).toFixed(1)}%;top:${(fy * 100).toFixed(1)}%;transform:translate(-50%,-50%) rotate(${rot.toFixed(1)}deg)">`;
+  }).join('');
+  layer.querySelectorAll('img').forEach(im => { im.onerror = () => im.remove(); });   // a site that refuses the picture just leaves a gap
+  for (const old of collageEl.querySelectorAll('.layer')) {
+    old.classList.remove('in');
+    setTimeout(() => old.remove(), 700);
+  }
+  collageEl.appendChild(layer);
+  requestAnimationFrame(() => requestAnimationFrame(() => layer.classList.add('in')));
+}
+addEventListener('resize', () => { if (mode === 'timeline') timelineBackdrop(TL[tlAt], true); });
+
+/* ---------- Timeline: a separate screen that steps through the events in order of year ----------
+   Big arrows on the left (earlier) and right (later), the arrow keys, a swipe, or the line along the bottom.
+   Under the card, a list that scrolls down shows the people connected to the event: Details shows a person in the card
+   (with a way back to the event), On the map opens them in Focus. */
+const TL = nodes.filter(n => n.type === 'event').sort((a, b) => a.year - b.year || a.name.localeCompare(b.name));
+const tlEl = document.getElementById('tl'), tlTrack = document.getElementById('tl-track'), tlStage = document.getElementById('tl-stage');
+const tlPrev = document.getElementById('tl-prev'), tlNext = document.getElementById('tl-next'), tlLine = document.getElementById('tl-line');
+let tlAt = 0, tlBuilt = false;
+const tlSpan = [START_YEAR, END_YEAR];
+const tlPct = y => ((y - tlSpan[0]) / (tlSpan[1] - tlSpan[0])) * 100;
+const tlShort = n => `${n.year} · ${n.name}`;
+const tlParas = n => (n.text || '').split(/\n\s*\n/).filter(t => t.trim());
+const tlPeople = ev => adj.get(ev.id).map(e => byId.get(e.id)).filter(p => p && p.type !== 'event').sort((a, b) => a.year - b.year || a.name.localeCompare(b.name));
+const tlThumb = p => p.picture ? `<img src="${esc(p.picture)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : esc(initialsOf(p));
+// One card's content: the event, or (person set) one of its people
+function tlCardHTML(ev, person, full) {
+  const n = person || ev, paras = tlParas(n);
+  const pic = n.picture
+    ? `<img src="${esc(n.picture)}" alt="${esc(n.name)}" loading="lazy" referrerpolicy="no-referrer">`
+    : `<span class="ini">${esc(initialsOf(n))}</span>`;
+  return `${person ? `<button class="tl-back"><span aria-hidden="true">←</span> Back to ${esc(ev.name)}</button>` : ''}
+    <span class="tl-pic">${pic}<span class="yr-tag">${esc(person ? dateOf(person) : String(ev.year))}</span></span>
+    <div class="tl-body${full ? ' full' : ''}">
+      <div class="kind"><i></i>${person ? 'Person · connected to this event' : 'Event'}</div>
+      <h2>${esc(n.name)}</h2>
+      <div class="when">${esc(dateOf(n))}</div>
+      ${(full ? paras : paras.slice(0, 1)).map(t => `<p>${esc(t)}</p>`).join('')}
+    </div>
+    <div class="tl-acts">${paras.length ? `<button class="tl-more">${full ? 'Show less' : 'Read more'}</button>` : ''}<button class="tl-map">${person ? 'See them on the map' : 'See it on the map'}</button></div>`;
+}
+function tlRenderCard(c, person = null, full = false) {
+  const ev = TL[+c.dataset.i];
+  c.dataset.person = person ? person.id : '';
+  c.dataset.full = full ? '1' : '';
+  c.classList.toggle('person', !!person);
+  c.innerHTML = tlCardHTML(ev, person, full);
+}
+function buildTimeline() {
+  tlBuilt = true;
+  tlTrack.innerHTML = TL.map((n, i) => `<article class="tl-card" data-i="${i}">${tlCardHTML(n, null, false)}</article>`).join('');
+  // Ticks every 10 or 20 years, and a mark for each entry
+  const step = [10, 20, 25, 50, 100].find(k => (tlSpan[1] - tlSpan[0]) / k <= (isMobile() ? 6 : 12)) || 100;
+  let marks = '';
+  for (let y = Math.ceil(tlSpan[0] / step) * step; y <= tlSpan[1]; y += step) marks += `<span class="tl-tick" style="left:${tlPct(y)}%">${y}</span>`;
+  marks += TL.map((n, i) => `<i class="tl-dot ${n.type}" data-i="${i}" style="left:${tlPct(n.year)}%"></i>`).join('');
+  tlLine.innerHTML = marks + '<span class="tl-here" id="tl-here"></span>';
+}
+function layoutTimeline() {
+  const W = tlStage.clientWidth;
+  const cw = isMobile() ? Math.min(420, W - 120) : Math.min(460, W - 400);
+  // Desktop: the arrows sit right beside the card in the middle, and the cards before and after peek in beyond them.
+  // Phones: the arrows sit at the screen edges and the neighbours stay just off screen.
+  const navW = isMobile() ? 0 : tlPrev.offsetWidth, pad = 24;
+  const gap = isMobile() ? 64 : navW + pad * 2;
+  const side = isMobile() ? '' : `${Math.max(8, W / 2 - cw / 2 - pad - navW)}px`;
+  tlPrev.style.left = side; tlNext.style.right = side;
+  tlStrip.style.width = isMobile() ? '' : `${Math.min(W - 32, cw + 2 * (navW + pad))}px`;
+  tlTrack.style.setProperty('--cw', cw + 'px');
+  tlTrack.style.setProperty('--gap', gap + 'px');
+  tlTrack.style.setProperty('--tx', `${W / 2 - (tlAt * (cw + gap) + cw / 2)}px`);
+}
+function timelineGo(i, opts = {}) {
+  if (!TL.length) return;
+  i = Math.max(0, Math.min(TL.length - 1, i));
+  const dir = Math.sign(i - tlAt);
+  tlAt = i;
+  const n = TL[i];
+  tlTrack.querySelectorAll('.tl-card').forEach((c, k) => {
+    c.classList.toggle('on', k === i);
+    if ((k !== i || opts.person !== undefined) && (c.dataset.person || c.dataset.full)) tlRenderCard(c);   // other cards go back to their event, closed
+    c.setAttribute('aria-hidden', String(k !== i));
+  });
+  layoutTimeline();
+  const before = TL[i - 1], after = TL[i + 1];
+  tlPrev.disabled = !before; tlNext.disabled = !after;
+  document.getElementById('tl-prev-to').textContent = before ? tlShort(before) : 'Start of the timeline';
+  document.getElementById('tl-next-to').textContent = after ? tlShort(after) : 'End of the timeline';
+  tlPrev.setAttribute('aria-label', before ? `Earlier: ${tlShort(before)}` : 'Start of the timeline');
+  tlNext.setAttribute('aria-label', after ? `Later: ${tlShort(after)}` : 'End of the timeline');
+  document.getElementById('tl-year').textContent = n.year;
+  document.getElementById('tl-count').textContent = `${i + 1} of ${TL.length}`;
+  document.getElementById('tl-here').style.left = tlPct(n.year) + '%';
+  tlLine.querySelectorAll('.tl-dot').forEach((d, k) => d.classList.toggle('seen', TL[k].year <= n.year));
+  tlLine.setAttribute('aria-valuetext', `${n.year}, ${n.name}`);
+  if (dir && !opts.quiet) {                            // flash the arrow for the direction you just moved
+    const btn = dir < 0 ? tlPrev : tlNext;
+    btn.classList.remove('pulse'); void btn.offsetWidth; btn.classList.add('pulse');
+  }
+  if (opts.person) tlRenderCard(tlTrack.children[i], opts.person);
+  if (opts.person !== undefined || tlStrip.dataset.ev !== n.id) renderStrip(n, opts.person);
+  timelineBackdrop(opts.person || n);
+  selected = (opts.person || n).id;                    // the map opens on this entry when you go back to it
+  renderIndex();
+  syncUrl();
+}
+function openTimeline() {
+  if (!tlBuilt) buildTimeline();
+  closeIndex();
+  tlTrack.style.transition = 'none';                   // land on the current entry without sliding across the whole line
+  timelineShow(selected, { quiet: true });
+  void tlTrack.offsetWidth; tlTrack.style.transition = '';
+}
+// Show any entry: an event directly; a person inside the card of their nearest connected event (or the nearest event in time)
+function timelineShow(id, opts = {}) {
+  const n = byId.get(id);
+  if (!n) return void timelineGo(0, opts);
+  if (n.type === 'event') return void timelineGo(TL.indexOf(n), opts);
+  const near = list => list.slice().sort((a, b) => Math.abs(a.year - n.year) - Math.abs(b.year - n.year))[0];
+  const ev = near(adj.get(id).map(e => byId.get(e.id)).filter(m => m && m.type === 'event'));
+  if (ev) return void timelineGo(TL.indexOf(ev), { ...opts, person: n });
+  timelineGo(TL.indexOf(near(TL)), opts);
+}
+tlPrev.onclick = () => timelineGo(tlAt - 1);
+tlNext.onclick = () => timelineGo(tlAt + 1);
+tlTrack.addEventListener('click', e => {
+  const c = e.target.closest('.tl-card');
+  if (!c) return;
+  const i = +c.dataset.i;
+  if (i !== tlAt) return void timelineGo(i);           // a card at the side brings it to the middle
+  const person = c.dataset.person ? byId.get(c.dataset.person) : null, shown = person || TL[i];
+  if (e.target.closest('.tl-back')) return void tlShowPerson(null);
+  if (e.target.closest('.tl-map')) { selected = shown.id; return void setMode('focus'); }
+  if (e.target.closest('.tl-more')) return void openTlModal(shown);
+  if (e.target.closest('.tl-pic') && shown.picture) openLightbox(shown);
+});
+// Read more: the whole card in a pop-up (full text, sources, picture credit). ×, Esc or a click outside closes it.
+const tlModal = document.getElementById('tl-modal'), tlModalBody = document.getElementById('tl-modal-body');
+let tlModalFor = null, tlModalFrom = null;
+function openTlModal(n) {
+  tlModalFor = n; tlModalFrom = document.activeElement;
+  const paras = tlParas(n);
+  tlModalBody.innerHTML = `
+    ${n.picture ? `<button class="tl-m-pic" aria-label="Show the picture large"><img src="${esc(n.picture)}" alt="${esc(n.name)}" referrerpolicy="no-referrer"></button>` : ''}
+    <div class="tl-m-text">
+      <div class="kind"><i></i>${TYPE[n.type]}</div>
+      <h2 id="tl-modal-title">${esc(n.name)}</h2>
+      <div class="when">${esc(dateOf(n))}</div>
+      ${paras.map(t => `<p>${esc(t)}</p>`).join('') || '<p class="none">No written history yet.</p>'}
+      ${n.source ? `<div class="tl-m-sec"><b class="h">Sources</b>${sourceList(n.source)}</div>` : ''}
+      ${n.picture && n.credit ? `<div class="tl-m-sec"><b class="h">Picture</b><p class="credit">${withLinks(esc(n.credit))}</p></div>` : ''}
+      <div class="tl-m-acts"><button class="tl-m-map">${n.type === 'event' ? 'See it on the map' : 'See them on the map'}</button></div>
+    </div>`;
+  tlModalBody.scrollTop = 0;
+  tlModal.classList.add('open');
+  tlModal.querySelector('.tl-m-close').focus();
+}
+function closeTlModal() {
+  if (!tlModal.classList.contains('open')) return;
+  tlModal.classList.remove('open');
+  if (tlModalFrom && tlModalFrom.focus) tlModalFrom.focus();
+}
+tlModal.addEventListener('click', e => {
+  if (e.target === tlModal || e.target.closest('.tl-m-close')) return closeTlModal();
+  if (e.target.closest('.tl-m-pic')) return openLightbox(tlModalFor);
+  if (e.target.closest('.tl-m-map')) { closeTlModal(); selected = tlModalFor.id; setMode('focus'); }
+});
+
+// The people strip under the card
+const tlStrip = document.getElementById('tl-strip');
+function renderStrip(ev, person = null) {
+  const people = tlPeople(ev);
+  const changed = tlStrip.dataset.ev !== ev.id;
+  tlStrip.dataset.ev = ev.id;
+  tlStrip.innerHTML = `<div class="tl-strip-head"><b>People connected to this event</b><span>${people.length || 'None recorded yet'}</span></div>` + (people.length
+    ? `<div class="tl-people-row" tabindex="0" aria-label="People connected to ${esc(ev.name)}">${people.map(p => `
+      <div class="tl-person${person && person.id === p.id ? ' on' : ''}" data-id="${p.id}">
+        <button class="tl-p-main" aria-label="Details: ${esc(p.name)}"><span class="th">${tlThumb(p)}</span><span class="tl-p-name">${esc(p.name)}<small>${esc(dateOf(p))}</small></span></button>
+        <div class="tl-p-acts"><button class="tl-p-detail">Details</button><button class="tl-p-map">On the map</button></div>
+      </div>`).join('')}</div>`
+    : '');
+  if (changed) { tlStrip.classList.remove('swap'); void tlStrip.offsetWidth; tlStrip.classList.add('swap'); }   // fades in with the new event
+}
+// Details: the person in the main card. null goes back to the event.
+function tlShowPerson(p) {
+  const c = tlTrack.children[tlAt], ev = TL[tlAt];
+  tlRenderCard(c, p);
+  tlStrip.querySelectorAll('.tl-person').forEach(t => t.classList.toggle('on', !!p && t.dataset.id === p.id));
+  timelineBackdrop(p || ev);
+  selected = (p || ev).id;
+  renderIndex();
+  syncUrl();
+}
+tlStrip.addEventListener('click', e => {
+  const t = e.target.closest('.tl-person');
+  if (!t) return;
+  const p = byId.get(t.dataset.id);
+  if (e.target.closest('.tl-p-map')) { selected = p.id; return void setMode('focus'); }
+  if (e.target.closest('.tl-p-detail, .tl-p-main')) tlShowPerson(p);
+});
+// Swipe left or right on the cards
+let tlSwipe = null;
+tlStage.addEventListener('pointerdown', e => { if (!e.target.closest('.tl-nav')) tlSwipe = { x: e.clientX, y: e.clientY }; });
+tlStage.addEventListener('pointerup', e => {
+  if (!tlSwipe) return;
+  const dx = e.clientX - tlSwipe.x, dy = e.clientY - tlSwipe.y;
+  tlSwipe = null;
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) timelineGo(tlAt + (dx < 0 ? 1 : -1));
+});
+// A trackpad's sideways scroll (or the wheel) steps one entry at a time
+let tlWheelAt = 0;
+tlStage.addEventListener('wheel', e => {
+  if (e.target.closest('.tl-body.full')) return;      // let an opened story scroll
+  e.preventDefault();
+  const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  if (Math.abs(d) < 12 || performance.now() - tlWheelAt < 380) return;
+  tlWheelAt = performance.now();
+  timelineGo(tlAt + Math.sign(d));
+}, { passive: false });
+// Click or drag along the line at the bottom to jump to the nearest entry in time
+function tlFromLine(e) {
+  const r = tlLine.getBoundingClientRect();
+  const y = tlSpan[0] + ((e.clientX - r.left) / r.width) * (tlSpan[1] - tlSpan[0]);
+  let best = 0;
+  TL.forEach((n, k) => { if (Math.abs(n.year - y) < Math.abs(TL[best].year - y)) best = k; });
+  if (best !== tlAt) timelineGo(best);
+}
+let tlDrag = false;
+tlLine.addEventListener('pointerdown', e => { tlDrag = true; tlLine.setPointerCapture(e.pointerId); tlFromLine(e); });
+tlLine.addEventListener('pointermove', e => { if (tlDrag) tlFromLine(e); });
+tlLine.addEventListener('pointerup', () => { tlDrag = false; });
+addEventListener('resize', () => { if (mode === 'timeline') layoutTimeline(); });
 
 /* ---------- Index panel ---------- */
 const indexEl = document.getElementById('index'), menu = document.getElementById('menu'), q = document.getElementById('q');
@@ -1042,11 +1306,20 @@ renderer.domElement.addEventListener('pointerup', e => {
 });
 addEventListener('keydown', e => {
   if (e.key === 'Escape' && lightbox.classList.contains('open')) return closeLightbox();
+  if (e.key === 'Escape' && tlModal.classList.contains('open')) return closeTlModal();
+  if (tlModal.classList.contains('open')) return;   // keys stay inside the pop-up while it is open
   if (e.key === 'Escape' && fixEl.classList.contains('open')) return closeFix();
   if (e.key === 'Escape' && legendEl.classList.contains('open')) return setLegend(false);
-  if (e.key === 'Escape') { if (exploring()) setMode('focus'); else if (detail) { detail = false; renderCard(); syncUrl(); } return closeIndex(); }
+  if (e.key === 'Escape') { if (exploring() || mode === 'timeline') setMode('focus'); else if (detail) { detail = false; renderCard(); syncUrl(); } return closeIndex(); }
   if (e.target.closest && e.target.closest('input, textarea, select')) return;
   if (e.key === '/') { e.preventDefault(); openIndex(); q.focus(); return; }
+  if (mode === 'timeline') {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); timelineGo(tlAt - 1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); timelineGo(tlAt + 1); }
+    if (e.key === 'Home') timelineGo(0);
+    if (e.key === 'End') timelineGo(TL.length - 1);
+    return;
+  }
   if (exploring()) {
     if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') travelYears(-5);      // ↑ heads into the scene, back in time
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown') travelYears(5);
@@ -1074,6 +1347,7 @@ const born = performance.now();
 let lastNow = born;
 const lastCam = new THREE.Vector3(), lastTarget = new THREE.Vector3();
 function tick(now) {
+  if (mode === 'timeline') { lastNow = now; return void requestAnimationFrame(tick); }   // the map is hidden behind the timeline: don't draw it
   const t = now / 1000;
   const dt = still ? 1e6 : Math.min(now - lastNow, 60);
   lastNow = now;
@@ -1245,4 +1519,5 @@ if (params.get('mode') === 'explore') {
   if (flight) { controls.target.copy(flight.toT); camera.position.copy(flight.toP); }
   setMode('explore');
 }
+if (params.get('mode') === 'timeline') setMode('timeline');
 requestAnimationFrame(tick);
