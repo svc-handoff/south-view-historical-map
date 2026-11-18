@@ -24,11 +24,12 @@ const YEAR_AT = z => START_YEAR + z / DEPTH;
 const ROSE = 0xD43C67;
 /* Light / dark themes. index.html sets data-theme on <html> before first paint; these are the matching scene colors.
    fg: outlines, rails, arrowheads, stars. bg: background, fog, the fill inside each shape.
-   rib: base color of the connection ribbons (vertex colors, 0–1). starK: star brightness (dark specks are busy on paper).
+   rib: base color of the connection ribbons (vertex colors, 0–1). fadeK: extra strength for the faint grey connections
+   (not the pink ones), which almost vanish on black. starK: star brightness (dark specks are busy on paper).
    tile/symbol: the canvas drawn inside a shape that has no photo. frame/frameLine/caption: the photo panels. mark: the logo. */
 const THEMES = {
-  dark:  { fg: 0xF2F2F0, bg: 0x000000, rib: [0.95, 0.95, 0.95], starK: 1,    tile: '#121212', symbol: '#8c8c88', frame: '#0d0d0d', frameLine: 'rgba(255,255,255,.22)', caption: '#6a6a66', mark: 'logo/mark-dark.svg',  meta: '#000000' },
-  light: { fg: 0x1A1915, bg: 0xF5F3EE, rib: [0.1, 0.1, 0.09],  starK: 0.35, tile: '#E8E5DE', symbol: '#8E8B84', frame: '#E8E5DE', frameLine: 'rgba(26,25,21,.22)',    caption: '#8E8B84', mark: 'logo/mark-light.svg', meta: '#F5F3EE' },
+  dark:  { fg: 0xF2F2F0, bg: 0x000000, rib: [0.95, 0.95, 0.95], fadeK: 1.8, starK: 1,    tile: '#121212', symbol: '#8c8c88', frame: '#0d0d0d', frameLine: 'rgba(255,255,255,.22)', caption: '#6a6a66', mark: 'logo/mark-dark.svg',  meta: '#000000' },
+  light: { fg: 0x1A1915, bg: 0xF5F3EE, rib: [0.1, 0.1, 0.09],  fadeK: 1,   starK: 0.35, tile: '#E8E5DE', symbol: '#8E8B84', frame: '#E8E5DE', frameLine: 'rgba(26,25,21,.22)',    caption: '#8E8B84', mark: 'logo/mark-light.svg', meta: '#F5F3EE' },
 };
 let theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 const TH = () => THEMES[theme];
@@ -1637,7 +1638,7 @@ function tick(now) {
     const onPath = within(L.a) && within(L.b) && Math.abs(ha - hb) === 1;
     let tint = 0;
     if (touches || (onPath && !exploring())) tint = 0.85;
-    if (L.mesh.visible) updateRibbon(L, L.opacity * (tint ? 1 + tint * 0.6 : 1), tint);
+    if (L.mesh.visible) updateRibbon(L, L.opacity * (tint ? 1 + tint * 0.6 : TH().fadeK), tint);
   }
   for (const g of glints) {
     const u = ((t / 9) + g.offset) % 1;
@@ -1719,7 +1720,9 @@ document.fonts.ready.then(() => { for (const it of items.values()) it.lw = 0; fo
 const intro = document.getElementById('intro');
 let savedMotion = null;
 try { savedMotion = localStorage.getItem('svhm-reduced-motion'); } catch (_) {}
-const startReduced = params.get('motion') === 'reduced' || (params.get('motion') !== 'full' && (savedMotion === '1' || (savedMotion === null && matchMedia('(prefers-reduced-motion: reduce)').matches)));
+// Computers open in the still 2D view unless the visitor has turned motion back on (saved) or the link says ?motion=full.
+// Phones keep the moving map, and follow the phone's own reduce-motion setting.
+const startReduced = params.get('motion') === 'reduced' || (params.get('motion') !== 'full' && (savedMotion === '1' || (savedMotion === null && (!isMobile() || matchMedia('(prefers-reduced-motion: reduce)').matches))));
 if (startReduced) setReduced(true, false);
 applyTheme(theme, false, true);                     // sync the button label and logo to the theme index.html picked
 if (skipIntro || reduced) {
@@ -1731,10 +1734,11 @@ if (skipIntro || reduced) {
   flyTo(selected, 3000, true);
   setTimeout(() => intro.classList.add('gone'), 1600);
 }
-// The main link opens in Focus on the first event (South-View founded); ?mode=explore opens Explore
+// The main link opens in Focus on the first event (South-View founded) on a computer, and in Timeline on a phone.
+// ?mode=explore / ?mode=timeline / ?mode=focus pick a view, and a link to an entry (?select=) opens it in Focus.
 if (params.get('mode') === 'explore') {
   if (flight) { controls.target.copy(flight.toT); camera.position.copy(flight.toP); }
   setMode('explore');
 }
-if (params.get('mode') === 'timeline') setMode('timeline');
+if (params.get('mode') === 'timeline' || (isMobile() && !params.has('mode') && !params.has('select'))) setMode('timeline');
 requestAnimationFrame(tick);
