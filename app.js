@@ -18,9 +18,57 @@ const withLinks = html => html.replace(/\b(?:https?:\/\/|www\.)[^\s<]+/g, u => {
 // Runs on already-escaped text, so the label stays plain text, and only http(s) URLs with no spaces or ")" become
 // links: anything else (javascript:, broken brackets) is left exactly as typed.
 const citeLinks = html => html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-// One list item per source; *stars* mark titles
+// Works Cited entries on the cards: the web address stays in the sheet but is not shown. Instead the entry's title
+// becomes the link (opens in a new tab): the title in quotes if there is one, else the *starred* italic title, else the
+// whole entry. Removing the address also drops the comma/space before it and keeps the punctuation after it, so
+// "FOX 5 Atlanta, 1 Oct. 2026, https://…." becomes "FOX 5 Atlanta, 1 Oct. 2026." An entry with no address, or with
+// two or more (no single title to hang them on), falls back to withLinks and shows its addresses, so no link is lost.
+const titleLink = html => {
+  const urls = html.match(/\b(?:https?:\/\/|www\.)[^\s<]+/g) || [];
+  if (urls.length !== 1) return withLinks(html);
+  const raw = urls[0], url = raw.replace(/[.,;)]+$/, '');            // same trailing-punctuation rule as withLinks
+  const i = html.indexOf(raw);
+  const text = html.slice(0, i).replace(/[,\s]+$/, '') + raw.slice(url.length) + html.slice(i + raw.length);
+  if (!text.trim()) return withLinks(html);                           // the entry is only an address: keep it visible
+  const a = t => `<a href="${url.startsWith('http') ? url : 'https://' + url}" target="_blank" rel="noopener">${t}</a>`;
+  const quoted = /(&quot;|\u201C)(.+?)(&quot;|\u201D)/;                 // esc() turned straight quotes into &quot;
+  if (quoted.test(text)) return text.replace(quoted, (m, o, t, c) => o + a(t) + c);
+  if (/<i>.+?<\/i>/.test(text)) return text.replace(/<i>(.+?)<\/i>/, (m, t) => `<i>${a(t)}</i>`);
+  return a(text);
+};
+// Picture credits (card, Timeline pop-up, enlarged picture): like titleLink, the web address stays in the sheet but is
+// not shown. Credits are written more loosely than sources, so the link goes on:
+//  1. the last quoted title that reads as a work's title: at the start, or after a comma, "in", "article" or "titled"
+//     (e.g. African American Registry, "Martin Luther King Sr., Pastor Born.") — a nickname like Carrie B. "Mama"
+//     Cunningham is not preceded by any of those, so it is never mistaken for the title;
+//  2. otherwise the last sentence before the address, skipping rights lines like "Public domain." (e.g. "Atlanta
+//     History Center Digital Collections."). Initials ("Robert W. Woodruff") and "Jr." don't end a sentence.
+// A credit with no address or with several keeps them visible (withLinks), so no link is ever lost.
+const RIGHTS_LINE = /^(public domain|listed as public domain|educational use permitted|no known restrictions|believed to be in the public domain|photographer and date unknown)/i;
+const creditLink = html => {
+  const urls = html.match(/\b(?:https?:\/\/|www\.)[^\s<]+/g) || [];
+  if (urls.length !== 1) return withLinks(html);
+  const raw = urls[0], url = raw.replace(/[.,;)]+$/, '');            // same trailing-punctuation rule as withLinks
+  const i = html.indexOf(raw);
+  const before = html.slice(0, i).replace(/[:,\s]+$/, ''), after = raw.slice(url.length) + html.slice(i + raw.length);
+  if (!before.trim()) return withLinks(html);                         // the credit is only an address: keep it visible
+  const a = t => `<a href="${url.startsWith('http') ? url : 'https://' + url}" target="_blank" rel="noopener">${t}</a>`;
+  const titles = [...before.matchAll(/(^|,\s|\b(?:in|article|titled)\s)(&quot;|“)(.+?)(&quot;|”)/g)];
+  if (titles.length) {
+    const m = titles.at(-1), at = m.index + m[1].length + m[2].length; // where the title text starts, inside its quotes
+    return before.slice(0, at) + a(m[3]) + before.slice(at + m[3].length) + after;
+  }
+  const sents = before.split(/(?<!\b[A-Z]\.)(?<!\bJr\.)(?<=\.)\s+(?=[A-Z])/);
+  let k = sents.length - 1;
+  while (k > 0 && RIGHTS_LINE.test(sents[k])) k--;
+  sents[k] = sents[k].replace(/^(.*?)(\.?)$/, (m, t, p) => a(t) + p);  // link the words, leave the full stop outside
+  return sents.join(' ') + after;
+};
+// One list item per source; *stars* mark titles. An address typed in angle brackets (<https://…>, as on Martin Luther
+// King Sr.'s card) has the brackets dropped first: otherwise esc() turns them into &lt;/&gt;, the "&gt" ends up inside
+// the link (a broken address) and a stray "<;" is left showing where the hidden address was.
 const sourceList = s => `<ol class="sources">${splitSources(s).map(t =>
-  `<li>${withLinks(esc(t).replace(/\*([^*]+)\*/g, '<i>$1</i>'))}</li>`).join('')}</ol>`;
+  `<li>${titleLink(esc(t.replace(/<((?:https?:\/\/|www\.)[^\s<>]+)>/g, '$1')).replace(/\*([^*]+)\*/g, '<i>$1</i>'))}</li>`).join('')}</ol>`;
 
 /* ---------- Constants ---------- */
 const DEPTH = 3.6;                                   // world units per year (time lives on the z axis only)
@@ -520,7 +568,7 @@ function renderCard() {
       <div><dt>${n.type === 'person' ? 'Lived' : 'When'}</dt><dd>${esc(n.dates)}</dd></div>
       ${n.rests ? `<div><dt>Rests at South-View</dt><dd>${esc(n.rests)}</dd></div>` : ''}
       <div class="wide src"><dt>Sources</dt><dd>${sourceList(n.source || 'Team notes')}</dd></div>
-      ${n.credit ? `<div class="wide"><dt>Picture</dt><dd>${withLinks(esc(n.credit))}</dd></div>` : ''}
+      ${n.credit ? `<div class="wide"><dt>Picture</dt><dd>${creditLink(esc(n.credit))}</dd></div>` : ''}
     </dl>
     ${connList('', 'Connections')}
     <div class="rip">
@@ -1130,7 +1178,7 @@ function openTlModal(n) {
       <div class="when">${esc(dateOf(n))}</div>
       ${paras.map(t => `<p>${citeLinks(esc(t))}</p>`).join('') || '<p class="none">No written history yet.</p>'}
       ${n.source ? `<div class="tl-m-sec"><b class="h">Sources</b>${sourceList(n.source)}</div>` : ''}
-      ${n.picture && n.credit ? `<div class="tl-m-sec"><b class="h">Picture</b><p class="credit">${withLinks(esc(n.credit))}</p></div>` : ''}
+      ${n.picture && n.credit ? `<div class="tl-m-sec"><b class="h">Picture</b><p class="credit">${creditLink(esc(n.credit))}</p></div>` : ''}
       <div class="tl-m-acts"><button class="tl-m-map">${n.type === 'event' ? 'See it on the map' : 'See them on the map'}</button></div>
     </div>`;
   tlModalBody.scrollTop = 0;
@@ -1225,7 +1273,7 @@ function openLightbox(n) {
   const img = lightbox.querySelector('img');
   img.src = n.picture; img.alt = n.name;
   lightbox.querySelector('.lb-name').textContent = n.name;
-  lightbox.querySelector('.lb-credit').innerHTML = withLinks(esc(n.credit || ''));
+  lightbox.querySelector('.lb-credit').innerHTML = creditLink(esc(n.credit || ''));
   lightbox.classList.add('open');
   lightbox.querySelector('.lb-close').focus();
 }
