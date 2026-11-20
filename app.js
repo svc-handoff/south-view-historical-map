@@ -13,6 +13,11 @@ const withLinks = html => html.replace(/\b(?:https?:\/\/|www\.)[^\s<]+/g, u => {
   const url = u.replace(/[.,;)]+$/, '');
   return `<a href="${url.startsWith('http') ? url : 'https://' + url}" target="_blank" rel="noopener">${url}</a>${u.slice(url.length)}`;
 });
+// In-text citations in the sheet's Body column are written as [Short title](https://…) (house style: a web source
+// links from its parenthetical). The card shows only the title, underlined; the URL stays hidden and opens in a new tab.
+// Runs on already-escaped text, so the label stays plain text, and only http(s) URLs with no spaces or ")" become
+// links: anything else (javascript:, broken brackets) is left exactly as typed.
+const citeLinks = html => html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 // One list item per source; *stars* mark titles
 const sourceList = s => `<ol class="sources">${splitSources(s).map(t =>
   `<li>${withLinks(esc(t).replace(/\*([^*]+)\*/g, '<i>$1</i>'))}</li>`).join('')}</ol>`;
@@ -25,11 +30,12 @@ const ROSE = 0xD43C67;
 /* Light / dark themes. index.html sets data-theme on <html> before first paint; these are the matching scene colors.
    fg: outlines, rails, arrowheads, stars. bg: background, fog, the fill inside each shape.
    rib: base color of the connection ribbons (vertex colors, 0–1). fadeK: extra strength for the faint grey connections
-   (not the pink ones), which almost vanish on black. starK: star brightness (dark specks are busy on paper).
+   (not the pink ones), raised in both themes so they stand out from the background (also the 2D view and arrowheads).
+   starK: star brightness (dark specks are busy on paper).
    tile/symbol: the canvas drawn inside a shape that has no photo. frame/frameLine/caption: the photo panels. mark: the logo. */
 const THEMES = {
-  dark:  { fg: 0xF2F2F0, bg: 0x000000, rib: [0.95, 0.95, 0.95], fadeK: 1.8, starK: 1,    tile: '#121212', symbol: '#8c8c88', frame: '#0d0d0d', frameLine: 'rgba(255,255,255,.22)', caption: '#6a6a66', mark: 'logo/mark-dark.svg',  meta: '#000000' },
-  light: { fg: 0x1A1915, bg: 0xF5F3EE, rib: [0.1, 0.1, 0.09],  fadeK: 1,   starK: 0.35, tile: '#E8E5DE', symbol: '#8E8B84', frame: '#E8E5DE', frameLine: 'rgba(26,25,21,.22)',    caption: '#8E8B84', mark: 'logo/mark-light.svg', meta: '#F5F3EE' },
+  dark:  { fg: 0xF2F2F0, bg: 0x000000, rib: [0.95, 0.95, 0.95], fadeK: 2.6, starK: 1,    tile: '#121212', symbol: '#8c8c88', frame: '#0d0d0d', frameLine: 'rgba(255,255,255,.22)', caption: '#6a6a66', mark: 'logo/mark-dark.svg',  meta: '#000000' },
+  light: { fg: 0x1A1915, bg: 0xF5F3EE, rib: [0.1, 0.1, 0.09],  fadeK: 2.2, starK: 0.35, tile: '#E8E5DE', symbol: '#8E8B84', frame: '#E8E5DE', frameLine: 'rgba(26,25,21,.22)',    caption: '#8E8B84', mark: 'logo/mark-light.svg', meta: '#F5F3EE' },
 };
 let theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 const TH = () => THEMES[theme];
@@ -502,7 +508,7 @@ function renderCard() {
   card.classList.toggle('open', detail);
   // Collapsed: the opening of the notes' text and "Learn more". Open: the whole text, facts and connections.
   const paras = (n.text || '').split(/\n\s*\n/).filter(t => t.trim());
-  const body = paras.length ? `<blockquote class="body${detail ? '' : ' clamp'}">${(detail ? paras : paras.slice(0, 1)).map(t => `<p>${esc(t)}</p>`).join('')}</blockquote>` : '';
+  const body = paras.length ? `<blockquote class="body${detail ? '' : ' clamp'}">${(detail ? paras : paras.slice(0, 1)).map(t => `<p>${citeLinks(esc(t))}</p>`).join('')}</blockquote>` : '';
   card.innerHTML = `
     <div class="grip" aria-hidden="true"></div>
     <div class="kind"><i></i>${TYPE[n.type]}<button class="more-cue" id="cue" aria-expanded="${detail}">${detail ? 'Less' : 'More'}</button></div>
@@ -1011,7 +1017,7 @@ function tlCardHTML(ev, person, full) {
       <div class="kind"><i></i>${person ? 'Person · connected to this event' : 'Event'}</div>
       <h2>${esc(n.name)}</h2>
       <div class="when">${esc(dateOf(n))}</div>
-      ${(full ? paras : paras.slice(0, 1)).map(t => `<p>${esc(t)}</p>`).join('')}
+      ${(full ? paras : paras.slice(0, 1)).map(t => `<p>${citeLinks(esc(t))}</p>`).join('')}
     </div>
     <div class="tl-acts">${paras.length ? `<button class="tl-more">${full ? 'Show less' : 'Read more'}</button>` : ''}<button class="tl-map">${person ? 'See them on the map' : 'See it on the map'}</button></div>`;
 }
@@ -1122,7 +1128,7 @@ function openTlModal(n) {
       <div class="kind"><i></i>${TYPE[n.type]}</div>
       <h2 id="tl-modal-title">${esc(n.name)}</h2>
       <div class="when">${esc(dateOf(n))}</div>
-      ${paras.map(t => `<p>${esc(t)}</p>`).join('') || '<p class="none">No written history yet.</p>'}
+      ${paras.map(t => `<p>${citeLinks(esc(t))}</p>`).join('') || '<p class="none">No written history yet.</p>'}
       ${n.source ? `<div class="tl-m-sec"><b class="h">Sources</b>${sourceList(n.source)}</div>` : ''}
       ${n.picture && n.credit ? `<div class="tl-m-sec"><b class="h">Picture</b><p class="credit">${withLinks(esc(n.credit))}</p></div>` : ''}
       <div class="tl-m-acts"><button class="tl-m-map">${n.type === 'event' ? 'See it on the map' : 'See them on the map'}</button></div>
